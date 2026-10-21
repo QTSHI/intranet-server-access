@@ -1,0 +1,17 @@
+node_modules/
+runtime/
+.env
+.env.*
+!.env.example
+config/*
+!config/README.md
+public/vendor/
+public/editor.mjs
+screenshots/
+docs/qa-*.json
+*.log
+*.zip
+*.pem
+*.key
+__pycache__/
+.DS_Store

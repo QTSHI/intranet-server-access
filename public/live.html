@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="使用个人校园 Linux 账号连接实验室远程终端，编辑账户权限内的文件，使用校园 SSH 终端。">
+  <meta name="theme-color" content="#f7f8fa">
+  <meta name="lab-base-path" content="">
+  <title>实验室远程工作台</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/live.css">
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <script defer src="/vendor/xterm.js"></script>
+  <script defer src="/vendor/addon-fit.js"></script>
+  <script type="module" src="/live.js"></script>
+</head>
+<body>
+  <a class="w-skip" href="#main">跳到主要内容</a>
+  <div id="app"></div>
+  <div id="modal-root"></div>
+  <div id="toast" class="w-toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="w-diagnostics" class="w-diagnostics" aria-labelledby="w-diagnostics-title">
+    <header><h2 id="w-diagnostics-title">连接诊断</h2><button id="w-diagnostics-close" class="w-icon-button" aria-label="关闭连接诊断">×</button></header>
+    <dl><div><dt>网页往返</dt><dd id="w-diagnostics-web">等待采样</dd></div><div><dt>校园文件通道</dt><dd id="w-diagnostics-campus">等待采样</dd></div><div><dt>终端处理排队</dt><dd id="w-diagnostics-render">等待采样</dd></div></dl>
+    <p>校园通道数值为文件请求耗时。</p><p id="w-diagnostics-detail"></p>
+  </dialog>
+</body>
+</html>

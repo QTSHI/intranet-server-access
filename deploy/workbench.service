@@ -1,0 +1,26 @@
+[Unit]
+Description=Intranet server terminal and file workbench
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/intranet-server-access
+ExecStart=/usr/bin/node /opt/intranet-server-access/server.mjs
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/intranet-server-access/workbench.env
+Restart=on-failure
+RestartSec=3
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+UMask=0077
+MemoryMax=160M
+TasksMax=32
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

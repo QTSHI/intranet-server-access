@@ -1,0 +1,93 @@
+// Real Chrome and real SSH/SFTP protocol, disposable loopback fixture only.
+import {chromium} from 'playwright-core';
+import ssh2 from 'ssh2';
+import {createApplication} from '../server.mjs';
+import http from 'node:http';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+const root=fileURLToPath(new URL('../',import.meta.url));
+const tmp=await fs.mkdtemp(path.join(os.tmpdir(),'lab-editor-browser-'));
+const key=path.join(tmp,'fake-host');
+execFileSync('ssh-keygen',['-q','-t','ed25519','-N','','-C','isolated-browser-fixture','-f',key],{stdio:'ignore'});
+const listen=s=>new Promise(r=>s.listen(0,'127.0.0.1',()=>r(s.address().port)));
+const checks=[],errors=[],csp=[],clients=new Set();let attempts=0,activeShells=0,lastInput='',lastResize=null,atomicSaves=0;
+const ok=(name,condition)=>{assert(condition,name);checks.push(name);};
+const nodes=new Map();
+const add=(p,text,mode=0o100644)=>nodes.set(p,{data:Buffer.isBuffer(text)?text:Buffer.from(text),mode,uid:1000,gid:1000,mtime:1700000000});
+add('/home/alice/README.txt','[ISOLATED SFTP TEST FIXTURE]\n<script>window.badPreview=true</script>\n校园账户文件编辑\n');
+add('/home/alice/projects/main.py','print("isolated fixture")\n');
+add('/home/alice/readonly.txt','readable but not writable\n',0o100444);
+add('/home/alice/binary.dat',Buffer.from([0,1,2]));add('/home/alice/big.txt',Buffer.alloc(262145,97));
+for(const p of ['/home/alice','/home/alice/projects'])nodes.set(p,{mode:0o040755,uid:1000,gid:1000,mtime:1700000000});
+const attrs=n=>({...n,size:n.data?.length??0,atime:1700000000,data:undefined});
+function advertise(sftp){const original=sftp._protocol.channelData;sftp._protocol.channelData=function(channel,payload){if(channel===sftp.outgoing.id&&payload.length===9&&payload[4]===2){const ext=Buffer.from('posix-rename@openssh.com');const out=Buffer.alloc(18+ext.length);payload.copy(out);out.writeUInt32BE(out.length-4,0);out.writeUInt32BE(ext.length,9);ext.copy(out,13);out.writeUInt32BE(1,13+ext.length);out[17+ext.length]=49;return original.call(this,channel,out);}return original.call(this,channel,payload);};}
+function serveFiles(sftp){advertise(sftp);const handles=new Map();let counter=0;
+ const get=(id,p)=>{const node=nodes.get(p);if(!node)sftp.status(id,2);return node;};
+ const handle=(id,value)=>{const b=Buffer.alloc(4);b.writeUInt32BE(++counter);handles.set(b.toString('hex'),value);sftp.handle(id,b);};
+ const entry=(id,h)=>{const value=handles.get(h.toString('hex'));if(!value)sftp.status(id,4);return value;};
+ sftp.on('error',()=>{});
+ sftp.on('REALPATH',(id,p)=>{p=path.posix.resolve('/home/alice',p);if(get(id,p))sftp.name(id,[{filename:p,longname:p,attrs:{}}]);});
+ for(const ev of ['STAT','LSTAT'])sftp.on(ev,(id,p)=>{const n=get(id,p);if(n)sftp.attrs(id,attrs(n));});
+ sftp.on('OPENDIR',(id,p)=>{if(get(id,p))handle(id,{p,listed:false});});
+ sftp.on('READDIR',(id,h)=>{const e=entry(id,h);if(!e)return;if(e.listed)return sftp.status(id,1);e.listed=true;sftp.name(id,[...nodes.entries()].filter(([p])=>path.posix.dirname(p)===e.p).map(([p,n])=>({filename:path.posix.basename(p),longname:p,attrs:attrs(n)})));});
+ sftp.on('OPEN',(id,p,flags,a)=>{if(flags&8){if(nodes.has(p))return sftp.status(id,4);add(p,'',0o100000|(a.mode??0o600));}const n=get(id,p);if(!n)return;if(flags&2&&!(n.mode&0o200))return sftp.status(id,3);handle(id,{p,n,writable:!!(flags&2)});});
+ sftp.on('FSTAT',(id,h)=>{const e=entry(id,h);if(e)sftp.attrs(id,attrs(e.n));});
+ sftp.on('READ',(id,h,offset,length)=>{const e=entry(id,h);if(!e)return;const b=e.n.data.subarray(offset,offset+length);b.length?sftp.data(id,b):sftp.status(id,1);});
+ sftp.on('WRITE',(id,h,offset,data)=>{const e=entry(id,h);if(!e)return;if(!e.writable)return sftp.status(id,3);const b=Buffer.alloc(Math.max(offset+data.length,e.n.data.length));e.n.data.copy(b);data.copy(b,offset);e.n.data=b;e.n.mtime++;sftp.status(id,0);});
+ sftp.on('FSETSTAT',(id,h,a)=>{const e=entry(id,h);if(!e)return;for(const k of ['uid','gid','mode'])if(a[k]!==undefined)e.n[k]=k==='mode'?0o100000|(a[k]&0o7777):a[k];sftp.status(id,0);});
+ sftp.on('CLOSE',(id,h)=>{handles.delete(h.toString('hex'));sftp.status(id,0);});
+ sftp.on('REMOVE',(id,p)=>{if(!path.posix.basename(p).startsWith('.lab-save-'))return sftp.status(id,3);nodes.delete(p);sftp.status(id,0);});
+ sftp.on('EXTENDED',(id,ext,payload)=>{if(ext!=='posix-rename@openssh.com')return sftp.status(id,8);let cursor=0;const take=()=>{const size=payload.readUInt32BE(cursor);cursor+=4;const s=payload.subarray(cursor,cursor+size).toString();cursor+=size;return s;};const from=take(),to=take();if(!nodes.has(from)||!nodes.has(to))return sftp.status(id,2);nodes.set(to,nodes.get(from));nodes.delete(from);atomicSaves++;sftp.status(id,0);});
+}
+const ssh=new ssh2.Server({hostKeys:[await fs.readFile(key)]},client=>{clients.add(client);client.on('error',()=>{});client.on('close',()=>clients.delete(client));client.on('authentication',ctx=>{if(ctx.method==='password'){attempts++;if(ctx.username==='alice'&&ctx.password==='fixture-password-only')return ctx.accept();}ctx.reject(['password']);});client.on('ready',()=>client.on('session',accept=>{const session=accept();session.on('pty',(accept,_,info)=>{lastResize=info;accept();});session.on('window-change',(accept,_,info)=>{lastResize=info;accept?.();});session.on('sftp',accept=>serveFiles(accept()));session.on('shell',accept=>{const stream=accept();activeShells++;stream.on('error',()=>{});stream.on('close',()=>activeShells--);stream.write('[ISOLATED SSH TEST FIXTURE]\r\nalice@fixture:~$ ');stream.on('data',chunk=>{lastInput+=chunk.toString();stream.write(chunk);});});}));});
+let app,browser,page;
+try{
+ const sshPort=await listen(ssh),reserve=http.createServer();const appPort=await listen(reserve);await new Promise(r=>reserve.close(r));const origin=`http://127.0.0.1:${appPort}`;
+ app=createApplication({sshHost:'127.0.0.1',sshPort,hostKeyPath:key+'.pub',allowedOrigins:[origin],loginTimeoutMs:10000,sshTimeoutMs:5000,idleTimeoutMs:120000,maxLifetimeMs:240000});await new Promise(r=>app.server.listen(appPort,'127.0.0.1',r));
+ browser=await chromium.launch({executablePath:process.env.CHROME_PATH||undefined,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});const context=await browser.newContext({viewport:{width:1440,height:960}});page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(/content security policy|refused to.*style|violates.*directive/i.test(m.text()))csp.push(m.text());});
+ const requested=[];page.on('request',r=>requested.push(new URL(r.url()).pathname));
+ await page.goto(origin+'/lab/');await page.locator('#campus-username').waitFor();
+ ok('campus login without Casdoor or guide/admin',page.url()===origin+'/lab/'&&!(await page.locator('body').innerText()).match(/管理后台|连接指南|Casdoor|密码仅用于|无需额外设置 VPN/));
+ ok('editor not loaded before first file',!requested.some(p=>p.endsWith('/editor.mjs')));ok('no SSH on page load',attempts===0);
+ await page.locator('#campus-username').fill('alice');await page.locator('#campus-password').fill('wrong-fixture-password');await page.locator('#w-connect').click();ok('password cleared on submit',await page.locator('#campus-password').inputValue()==='');
+ await page.waitForFunction(()=>document.querySelector('#w-login-feedback').textContent.includes('认证失败'));ok('real SSH auth failure shown',attempts===1);
+ await page.locator('#campus-password').fill('fixture-password-only');await page.locator('#w-connect').click();await page.locator('#w-workspace').waitFor({state:'visible'});ok('real authenticated SSH shell opens',activeShells===1);
+ const row=p=>page.locator(`[role=treeitem][data-path="/home/alice/${p}"]`),cm=()=>page.locator('.cm-content');
+ await row('README.txt').waitFor();ok('same authenticated SFTP home lists files',true);ok('editor still lazy after login',!requested.some(p=>p.endsWith('/editor.mjs')));
+ await row('README.txt').click();await cm().waitFor({state:'visible'});await page.waitForFunction(()=>document.querySelector('.cm-content').textContent.includes('校园账户文件编辑'));
+ ok('remote UTF8 loaded into selfhosted CodeMirror',requested.some(p=>p.endsWith('/editor.mjs')));ok('remote HTML remains plain text',!await page.evaluate(()=>window.badPreview)&&await cm().locator('script').count()===0);
+ ok('line numbers rendered',await page.locator('.cm-lineNumbers').count()===1);
+ const replace=async text=>{await cm().click();await page.keyboard.press('Control+Home');await page.keyboard.press('Control+a');await page.keyboard.insertText(text);};
+ await replace('edited fixture\n中文保存\n');await page.locator('#w-save:not([disabled])').waitFor();ok('typing marks file dirty',await page.locator('.w-tab-dirty:not([hidden])').count()===1);
+ await page.keyboard.press('Control+s');await page.waitForFunction(()=>document.querySelector('#w-editor-status').textContent.startsWith('已保存'));ok('Ctrl+S writes via real SFTP atomic rename',nodes.get('/home/alice/README.txt').data.toString()==='edited fixture\n中文保存\n'&&atomicSaves===1);
+ await row('projects').click();await row('projects/main.py').waitFor();await row('projects/main.py').click();await page.waitForFunction(()=>document.querySelector('.cm-content').textContent.includes('isolated fixture'));
+ ok('multiple file tabs open',await page.locator('[data-tab-id]').count()===2);
+ await replace('print("draft remains")\n');const pyTab=await page.locator('[data-tab-id][aria-selected=true]').getAttribute('data-tab-id');
+ await page.locator('[data-tab-id]').filter({hasText:'README.txt'}).click();await page.locator(`[data-tab-id="${pyTab}"]`).click();ok('switching tabs preserves unsaved draft',(await cm().innerText()).includes('draft remains'));
+ await page.keyboard.press('Control+z');await page.waitForFunction(()=>document.querySelector('.cm-content').textContent.includes('isolated fixture'));ok('per-tab undo history survives switch',true);
+ await replace('print("conflict draft")\n');nodes.get('/home/alice/projects/main.py').data=Buffer.from('print("external writer")\n');nodes.get('/home/alice/projects/main.py').mtime++;
+ await page.locator('#w-save').click();await page.waitForFunction(()=>document.querySelector('#w-editor-status').textContent.includes('保存冲突'));ok('external conflict preserves draft and server content',(await cm().innerText()).includes('conflict draft')&&nodes.get('/home/alice/projects/main.py').data.toString().includes('external writer')&&await page.locator('#w-save').isDisabled());
+ await page.locator('#w-reload').click();await page.locator('#w-confirm-cancel').click();ok('reload cancellation keeps local draft',(await cm().innerText()).includes('conflict draft'));
+ await page.locator('#w-reload').click();await page.locator('#w-confirm-accept').click();await page.waitForFunction(()=>document.querySelector('.cm-content').textContent.includes('external writer'));ok('confirmed reload restores current remote version',true);
+ await row('readonly.txt').click();await page.waitForFunction(()=>document.querySelector('.cm-content').textContent.includes('readable but'));await replace('unauthorized edit');await page.locator('#w-save').click();await page.waitForFunction(()=>document.querySelector('#w-editor-message').textContent.includes('权限'));ok('read-only permission denied without ending SSH',nodes.get('/home/alice/readonly.txt').data.toString()==='readable but not writable\n'&&activeShells===1);
+ const readonlyTab=await page.locator('[data-tab-id][aria-selected=true]').getAttribute('data-tab-id');await page.locator(`[data-tab-close="${readonlyTab}"]`).click();await page.locator('#w-confirm-cancel').click();ok('dirty close cancellation retains tab',await page.locator(`[data-tab-id="${readonlyTab}"]`).count()===1);await page.locator(`[data-tab-close="${readonlyTab}"]`).click();await page.locator('#w-confirm-accept').click();ok('confirmed dirty close discards only selected tab',await page.locator('[data-tab-id]').count()===2);
+ await row('binary.dat').click();await page.waitForFunction(()=>document.querySelector('#w-editor-message').textContent.includes('二进制'));ok('binary edit refused and SSH remains open',activeShells===1);
+ await page.locator('[data-tab-close]').last().click();await row('big.txt').click();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('256'));ok('oversize file refused before read',await page.locator('[data-tab-id]').count()===2);
+ await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('fixture-input');await page.keyboard.press('Enter');await page.waitForTimeout(100);ok('terminal inputs still reach real SSH channel',lastInput.includes('fixture-input\r'));
+ await page.locator('#w-latency').click();await page.locator('#w-diagnostics[open]').waitFor();await page.waitForFunction(()=>/ms/.test(document.querySelector('#w-diagnostics-web').textContent));await page.waitForFunction(()=>/ms/.test(document.querySelector('#w-diagnostics-campus').textContent),{timeout:22000});ok('page and remote SFTP latency both measured',true);await page.locator('#w-diagnostics-close').click();
+ await page.locator('#w-terminal-collapse').click();ok('terminal collapses independently',await page.locator('#w-workspace').evaluate(e=>e.classList.contains('w-terminal-collapsed')));await page.locator('#w-terminal-toggle').click();
+ await page.locator('#w-fullscreen').click();await page.waitForFunction(()=>!!document.fullscreenElement);await page.locator('#w-fullscreen').click();await page.waitForFunction(()=>!document.fullscreenElement);ok('fullscreen and PTY resizing work',lastResize?.cols>0&&lastResize?.rows>0);
+ await fs.mkdir(root+'/screenshots',{recursive:true});await page.screenshot({path:root+'/screenshots/editor-workspace-fixture.png',fullPage:true});
+ for(const width of [768,375]){await page.setViewportSize({width,height:900});await page.waitForTimeout(120);ok(`workspace fits ${width}px`,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));if(width===375){await page.locator('[data-view=editor]').click();await cm().waitFor({state:'visible'});await page.locator('[data-view=files]').click();ok('mobile file drawer opens',await page.locator('#w-file-sidebar').evaluate(e=>e.classList.contains('w-drawer-open')));await page.keyboard.press('Escape');await page.locator('[data-view=terminal]').click();await page.locator('#w-xterm').waitFor({state:'visible'});ok('mobile terminal returns without new session',activeShells===1);await page.screenshot({path:root+'/screenshots/editor-mobile-fixture.png',fullPage:true});}}
+ await page.setViewportSize({width:1440,height:960});await page.locator('[data-tab-id]').filter({hasText:'README.txt'}).click();await replace('disconnect draft');for(const client of clients)client.end();await page.waitForFunction(()=>document.querySelector('#w-session-status').textContent.includes('已断开'));
+ ok('unexpected disconnect retains visible draft and disables save',(await cm().innerText()).includes('disconnect draft')&&await page.locator('#w-save').isDisabled());await page.locator('#w-disconnect').click();await page.locator('#w-confirm-cancel').click();ok('return login cancellation preserves disconnected draft',(await cm().innerText()).includes('disconnect draft'));await page.locator('#w-disconnect').click();await page.locator('#w-confirm-accept').click();await page.locator('#campus-username').waitFor({state:'visible'});ok('confirmed return clears all remote tabs',await page.locator('[data-tab-id]').count()===0);
+ ok('no content or password stored in browser',!(await page.evaluate(()=>JSON.stringify(localStorage)+JSON.stringify(sessionStorage))).match(/fixture-password|disconnect draft|external writer/));ok('credentials absent from URL',!page.url().includes('alice')&&!page.url().includes('password'));
+ for(const prefix of ['', '/lab']){await page.goto(origin+prefix+'/');await page.locator('#campus-username').waitFor();ok(`direct login available at ${prefix||'/'} route`,true);}
+ for(const route of ['/prototype/','/app.js','/config/campus-host-key.pub','/bridge.mjs']){const r=await context.request.get(origin+route);ok(`private ${route} remains unavailable`,r.status()===404);}
+ ok('no browser runtime errors',errors.length===0);ok('no CSP violations',csp.length===0);
+ await fs.writeFile(root+'/docs/qa-editor-browser.json',JSON.stringify({version:'4.0.0',passed:checks.length,checks,errors,csp,environment:'Real Chrome plus disposable loopback SSH/SFTP. All accounts, files and screenshots are isolated fixtures; no campus commands or real credentials.'},null,2)+'\n');console.log(JSON.stringify({passed:checks.length,errors,csp}));
+}catch(e){await page?.screenshot({path:'/tmp/lab-editor-failure.png',fullPage:true}).catch(()=>{});console.error(JSON.stringify({completed:checks,errors,csp}));throw e;}finally{await browser?.close();if(app){await app.bridge.close();app.server.closeAllConnections?.();await new Promise(r=>app.server.close(r));}for(const client of clients)client.end();await new Promise(r=>ssh.close(r));await fs.rm(tmp,{recursive:true,force:true});}

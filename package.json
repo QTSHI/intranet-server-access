@@ -1,0 +1,38 @@
+{
+  "name": "intranet-server-access",
+  "version": "4.0.0",
+  "private": true,
+  "type": "module",
+  "description": "通过反向 SSH 隧道和浏览器工作台访问仅内网可达的 Linux 服务器",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check bridge.mjs && node --check public/live.js && node --check scripts/editor-source.mjs",
+    "vendor": "node scripts/vendor.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "build:editor": "node scripts/build-editor.mjs",
+    "test:browser:editor": "node tests/browser-editor.mjs",
+    "test:browser:viewport": "node tests/browser-viewport.mjs",
+    "test:browser:quick-input": "node tests/browser-quick-input.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@codemirror/lang-javascript": "6.2.5",
+    "@codemirror/lang-json": "6.0.2",
+    "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/lang-python": "6.2.1",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "codemirror": "6.0.2",
+    "ssh2": "1.17.0",
+    "ws": "8.22.0",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@codemirror/commands": "6.11.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright-core": "1.58.2"
+  }
+}

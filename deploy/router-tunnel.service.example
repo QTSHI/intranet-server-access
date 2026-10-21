@@ -1,0 +1,45 @@
+# Example for an internal Linux relay host with systemd and OpenSSH.
+# OpenWrt/procd routers need equivalent startup configuration instead of this unit.
+#
+# The administrator creates the unprivileged local system account relay-tunnel,
+# installs its key at /etc/intranet-server-access/relay_ed25519 (owner relay-tunnel,
+# mode0600), and pins the verified VPS key in relay_known_hosts in the same directory.
+# Use a dedicated VPS lab_relay account limited to reverse port127.0.0.1:22002;
+# configure its authorized_keys and sshd policy separately. No shell is needed.
+# Replace both documentation-only IP addresses before enabling the unit.
+[Unit]
+Description=Internal SSH server reverse tunnel to the workbench VPS
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=relay-tunnel
+ExecStart=/usr/bin/ssh -F /dev/null -NT \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=yes \
+    -o UpdateHostKeys=no \
+    -o UserKnownHostsFile=/etc/intranet-server-access/relay_known_hosts \
+    -o GlobalKnownHostsFile=/dev/null \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=3 \
+    -o ConnectTimeout=10 \
+    -o ForwardAgent=no \
+    -i /etc/intranet-server-access/relay_ed25519 \
+    -p 22 \
+    -R 127.0.0.1:22002:192.168.50.10:22 \
+    lab_relay@203.0.113.10
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+UMask=0077
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

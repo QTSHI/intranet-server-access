@@ -1,0 +1,13 @@
+import {copyFile,mkdir} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+const root=fileURLToPath(new URL('../',import.meta.url));
+const files=[['@xterm/xterm/lib/xterm.js','xterm.js'],['@xterm/xterm/css/xterm.css','xterm.css'],['@xterm/addon-fit/lib/addon-fit.js','addon-fit.js']];
+await mkdir(path.join(root,'public/vendor'),{recursive:true});
+await mkdir(path.join(root,'docs/licenses'),{recursive:true});
+for(const [source,target] of files)await copyFile(path.join(root,'node_modules',source),path.join(root,'public/vendor',target));
+for(const [source,target] of [['@xterm/xterm/LICENSE','xterm-LICENSE'],['@xterm/addon-fit/LICENSE','addon-fit-LICENSE']])await copyFile(path.join(root,'node_modules',source),path.join(root,'docs/licenses',target));
+const packages=['codemirror','@codemirror/state','@codemirror/view','@codemirror/commands','@codemirror/language','@codemirror/autocomplete','@codemirror/search','@codemirror/lint','@codemirror/streamparser','@codemirror/lang-python','@codemirror/lang-javascript','@codemirror/lang-json','@codemirror/lang-markdown','@codemirror/lang-html','@codemirror/lang-css','@lezer/common','@lezer/highlight','@lezer/lr','@lezer/python','@lezer/javascript','@lezer/json','@lezer/markdown','@lezer/html','@lezer/css','@marijn/find-cluster-break','crelt','style-mod','w3c-keyname'];
+for(const name of packages) await copyFile(path.join(root,'node_modules',name,'LICENSE'),path.join(root,'docs/licenses',name.replaceAll('/','-')+'-LICENSE'));
+await import('./build-editor.mjs');
+console.log('Vendored terminal/editor assets and license notices.');
